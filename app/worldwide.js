@@ -211883,8 +211883,10 @@ async function pickClaims(opts) {
 }
 
 // src/scraperClient/machineControl.ts
-init_database();
-var q5 = async (sql2, params = []) => (await poolConnection.query(sql2, params))[0];
+var q5 = async (sql2, params = []) => {
+  const { poolConnection: poolConnection2 } = await Promise.resolve().then(() => (init_database(), database_exports));
+  return (await poolConnection2.query(sql2, params))[0];
+};
 async function ensureMachineTable() {
   await q5(`CREATE TABLE IF NOT EXISTS \`scraper_machines\` (
     \`machine\` varchar(80) NOT NULL, \`state\` varchar(16) NOT NULL DEFAULT 'running', \`command\` varchar(8) NOT NULL DEFAULT 'run',

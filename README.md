@@ -29,7 +29,7 @@ sudo systemctl start stackandcode-scraper
 sudo nano /opt/stackandcode-scraper/settings.txt && sudo systemctl restart stackandcode-scraper   # token, countries, WORKERS
 ```
 
-Update to the latest version: `cd scraper && git pull && sudo bash install-ubuntu.sh --token <same token> --name <same name>`.
+Update to the latest version (keeps the token): `cd scraper && sudo bash update-ubuntu.sh`.
 
 ## Sizing
 
