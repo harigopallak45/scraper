@@ -1,0 +1,22 @@
+[Unit]
+Description=StackandCode Maps scraper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scraper
+Group=scraper
+Environment=SCRAPER_HOME=/opt/stackandcode-scraper
+WorkingDirectory=/opt/stackandcode-scraper
+# run.js keeps the scraper running and restarts it after crashes
+ExecStart=/usr/bin/node /opt/stackandcode-scraper/app/run.js
+Restart=on-failure
+RestartSec=30
+# a stop asks the scraper to finish the businesses in progress first
+TimeoutStopSec=150
+KillSignal=SIGTERM
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

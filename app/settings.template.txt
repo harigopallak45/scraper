@@ -1,0 +1,12 @@
+# StackandCode scraper settings. Lines starting with # are notes. Save the file, then start the program.
+
+# Required: where the StackandCode server is, and the token made for THIS computer
+# (the token is made by the owner with:  npm run scraper:client -- create "Name of this computer")
+SCRAPER_API_URL=https://client.truewilly.com
+SCRAPER_TOKEN=PASTE-THE-TOKEN-HERE
+
+# Optional
+# MACHINE_NAME=Office laptop
+# WORKERS=3                       how many browser windows at once (default: chosen from this computer's memory)
+# COUNTRIES=United Kingdom,Australia      search only these countries (default: all)
+# PACE=0.85                       lower = faster, higher = gentler on Google (1 = slowest, fewest captchas)
