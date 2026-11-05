@@ -190379,6 +190379,10 @@ var init_apiClaims = __esm({
       async loadKnownKeys() {
         return new Set((await this.call("GET", "/known-places", void 0, 3, 18e4)).keys);
       }
+      async control(b, fresh = false) {
+        const r = await this.call("POST", "/control", { ...b, startedAt: b.startedAt.toISOString(), fresh }, 1, 15e3);
+        return { command: r.command, targetBrowsers: r.targetBrowsers };
+      }
       async heartbeat(stats2) {
         await this.call("POST", "/heartbeat", { stats: stats2 }, 1, 15e3).catch(() => {
         });
@@ -211906,11 +211910,13 @@ async function beat(b) {
     [b.machine, b.state, b.browsers, b.browsersMax, b.searches, b.failed, b.saved, b.emails, b.captchas, b.queue, b.ramPct, b.cpuPct, b.pid, b.startedAt]
   );
   const [r] = await q5("SELECT command, target_browsers FROM scraper_machines WHERE machine = ?", [b.machine]);
-  return { command: r?.command || "run", targetBrowsers: r?.target_browsers ?? null };
+  const command = r?.command || "run";
+  if (command === "restart") await q5(`UPDATE scraper_machines SET command = 'run' WHERE machine = ? AND command = 'restart'`, [b.machine]);
+  return { command, targetBrowsers: r?.target_browsers ?? null };
 }
 async function clearCommand(machine) {
   await q5(`INSERT INTO scraper_machines (machine, command, last_seen) VALUES (?, 'run', UTC_TIMESTAMP())
-           ON DUPLICATE KEY UPDATE command = 'run', state = 'running'`, [machine]);
+           ON DUPLICATE KEY UPDATE command = IF(command = 'pause', command, 'run'), state = 'running'`, [machine]);
 }
 async function markStopped(machine) {
   await q5(`UPDATE scraper_machines SET state = 'stopped', browsers = 0, last_seen = UTC_TIMESTAMP() WHERE machine = ?`, [machine]).catch(() => void 0);
@@ -212311,6 +212317,7 @@ var stats = { skippedFewReviews: 0, frozenTabs: 0, jobs: 0, places: 0, saved: 0,
 var maxActive = WORKERS;
 var remoteCap = WORKERS;
 var remoteOn = false;
+var remoteStop = false;
 var activeNow = () => Math.min(maxActive, resourceCap, remoteCap);
 var blockedUntil = 0;
 var backoffMin = 15;
@@ -212703,7 +212710,53 @@ async function worker(id, browser, queue2, known) {
   if (page) await page.close().catch(() => {
   });
 }
+function beatBody(state, browsers) {
+  return { machine: MACHINE, state, browsers, browsersMax: WORKERS, searches: stats.jobs, failed: stats.failedJobs, saved: stats.saved, emails: stats.emails, captchas: stats.blocks, queue: queue.length, ramPct: Math.round(ramPct), cpuPct: Math.round(cpuPct), pid: process.pid, startedAt: new Date(startedAt) };
+}
+var sendBeat = (b, fresh = false) => CLAIMS?.control ? CLAIMS.control(b, fresh) : beat(b);
+async function reportStopped() {
+  if (!remoteOn) return;
+  try {
+    if (CLAIMS?.control) await CLAIMS.control(beatBody("stopped", 0));
+    else await markStopped(MACHINE);
+  } catch {
+  }
+}
+async function idleUntilStart() {
+  try {
+    CLAIMS = await pickClaims({ dry: DRY });
+    if (CLAIMS) await CLAIMS.init();
+  } catch {
+    CLAIMS = null;
+  }
+  remoteOn = true;
+  log(`Stopped from the app: waiting for Start ("${MACHINE}"). Nothing is running.`);
+  let warned = false;
+  for (; ; ) {
+    if (import_fs6.default.existsSync(STOP_FILE)) {
+      log("A local stop file exists: leaving.");
+      process.exit(0);
+    }
+    try {
+      const r = await sendBeat(beatBody("stopped", 0));
+      if (r.command !== "stop") {
+        log(`Start received (${r.command}): starting the scraper.`);
+        return;
+      }
+    } catch (e) {
+      if (!warned) {
+        warned = true;
+        log(`Idle: could not reach the app (${String(e.message).slice(0, 80)}); will keep trying.`);
+      }
+    }
+    await sleep(15e3);
+  }
+}
 async function main() {
+  if (flag("idle")) {
+    await idleUntilStart();
+    process.exit(4);
+  }
   try {
     CLAIMS = await pickClaims({ dry: DRY });
     if (CLAIMS) {
@@ -212727,6 +212780,14 @@ async function main() {
       await clearCommand(MACHINE);
       remoteOn = true;
       log(`Remote control: this computer is "${MACHINE}" in the app's Scraper computers screen.`);
+    } catch (e) {
+      log(`Remote control unavailable (${String(e.message).slice(0, 90)}); the STOP file still works.`);
+    }
+  } else if (!DRY && CLAIMS?.control) {
+    try {
+      await CLAIMS.control(beatBody("running", 0), true);
+      remoteOn = true;
+      log(`Remote control: this computer is "${CLAIMS.machine}" on the server (the app's Search computers screen lists it under its token name).`);
     } catch (e) {
       log(`Remote control unavailable (${String(e.message).slice(0, 90)}); the STOP file still works.`);
     }
@@ -212786,14 +212847,18 @@ async function main() {
     if (!remoteOn) return;
     try {
       const state = stopping || shouldHalt() ? "stopping" : remoteCap === 0 ? "paused" : "running";
-      const r = await beat({ machine: MACHINE, state, browsers: remoteCap === 0 ? 0 : activeNow(), browsersMax: WORKERS, searches: stats.jobs, failed: stats.failedJobs, saved: stats.saved, emails: stats.emails, captchas: stats.blocks, queue: queue.length, ramPct: Math.round(ramPct), cpuPct: Math.round(cpuPct), pid: process.pid, startedAt: new Date(startedAt) });
+      const r = await sendBeat(beatBody(state, remoteCap === 0 ? 0 : activeNow()));
+      if (r.command === "restart") {
+        if (!draining && !stopping) {
+          log("Restart requested from the app: finishing the current searches, then starting fresh.");
+          draining = true;
+        }
+        return;
+      }
       if (r.command === "stop") {
         if (!stopping) {
-          log("Stop requested from the app: finishing the current searches, then stopping.");
-          try {
-            import_fs6.default.writeFileSync(STOP_FILE, "stopped from the app\n");
-          } catch {
-          }
+          log("Stop requested from the app: finishing the current searches, then waiting for Start.");
+          remoteStop = true;
           stopping = true;
         }
         return;
@@ -212862,6 +212927,12 @@ async function main() {
   closing = true;
   await browser.close().catch(() => {
   });
+  if (remoteStop) {
+    log("Stopped from the app. Waiting for Start; this computer stays connected and uses almost no memory.");
+    await reportStopped();
+    if (!DRY) await closeDb();
+    process.exit(6);
+  }
   if (draining && !shouldHalt() && Date.now() < deadline) {
     log("Browser recycle: exiting for a fresh start (supervisor restarts it).");
     if (!DRY) await closeDb();
@@ -212869,12 +212940,12 @@ async function main() {
   }
   if (!draining && !shouldHalt() && queue.length === 0 && deferred.length === 0) {
     log(`QUEUE COMPLETE. searches ${stats.jobs}, businesses read ${stats.places}, saved ${stats.saved}, with email ${stats.emails}. Nothing left to search.`);
-    if (remoteOn) await markStopped(MACHINE);
+    await reportStopped();
     if (!DRY) await closeDb();
     process.exit(5);
   }
   log(`FINISHED. searches ${stats.jobs}, businesses read ${stats.places}, saved ${stats.saved}, with email ${stats.emails}, captchas ${stats.blocks}, save errors ${stats.saveErrors}.`);
-  if (remoteOn) await markStopped(MACHINE);
+  await reportStopped();
   if (!DRY) await closeDb();
   process.exit(0);
 }

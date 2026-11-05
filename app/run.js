@@ -100,6 +100,11 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const runChild = (args) => new Promise((resolve) => {
+  child = spawn(process.execPath, args, { env, stdio: 'inherit', cwd: ROOT });
+  child.on('exit', (c) => { child = null; resolve(c === null ? 1 : c); });
+  child.on('error', () => { child = null; resolve(1); });
+});
 (async () => {
   say(`StackandCode scraper on "${machine}": ${workers} browsers (this computer has ${totalMb} MB RAM). Server: ${settings.SCRAPER_API_URL}`);
   say(`To stop: press Ctrl+C, or create the file ${STOP}`);
@@ -107,17 +112,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   while (!stopRequested()) {
     const args = [path.join(APP, 'worldwide.js'), '--hours', '0', '--workers', String(workers), '--limit', '40', '--recycle-minutes', '75'];
     if (settings.COUNTRIES) args.push('--countries', settings.COUNTRIES);
-    const code = await new Promise((resolve) => {
-      child = spawn(process.execPath, args, { env, stdio: 'inherit', cwd: ROOT });
-      child.on('exit', (c) => resolve(c === null ? 1 : c));
-      child.on('error', () => resolve(1));
-    });
-    child = null;
+    const code = await runChild(args);
     if (stopRequested()) break;
     if (code === 5) { say('Nothing left to search: every search on the shared list is finished. Stopping.'); break; }
+    if (code === 6) {
+      // The app owner pressed Stop. Stay here and run the tiny --idle program, which keeps reporting "stopped" and exits
+      // (code 4) as soon as the app says Start, then the scraper below starts again.
+      say('Stopped from the app. Waiting for Start (this computer stays connected).');
+      while (!stopRequested()) {
+        const c = await runChild([path.join(APP, 'worldwide.js'), '--idle']);
+        if (c === 4 || stopRequested()) break;
+        await sleep(60000);
+      }
+      continue;
+    }
     restarts++;
     say(`The scraper exited (code ${code}); restart #${restarts}.`);
-    // 4 = planned browser recycle: straight back; 2 = server unreachable or token refused; anything else = crash
+    // 4 = planned browser recycle or Restart from the app: straight back; 2 = server unreachable or token refused; 6 = Stop from the app (handled above); anything else = crash
     await sleep(code === 4 ? 5000 : 60000);
   }
   say('Stopped.');
