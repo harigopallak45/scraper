@@ -85547,16 +85547,47 @@ var init_accountTypes = __esm({
 async function ensureMailboxTable(conn) {
   await conn.query(`CREATE TABLE IF NOT EXISTS \`org_secrets\` (
     \`org_id\` varchar(191) NOT NULL, \`name\` varchar(64) NOT NULL, \`value_enc\` text NOT NULL, \`updated_at\` text NOT NULL, PRIMARY KEY (\`org_id\`, \`name\`))`);
-  await conn.query(`CREATE TABLE IF NOT EXISTS \`outreach_mailboxes\` (
-    \`org_id\` varchar(191) NOT NULL, \`username\` varchar(191) NOT NULL, \`password_enc\` text NOT NULL,
-    \`smtp_host\` varchar(191) NOT NULL, \`smtp_port\` int NOT NULL, \`imap_host\` varchar(191) NOT NULL, \`imap_port\` int NOT NULL,
-    \`updated_at\` text NOT NULL, PRIMARY KEY (\`org_id\`))`);
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS \`outreach_mailboxes\` (
+      \`id\` varchar(191) NOT NULL,
+      \`org_id\` varchar(191) NOT NULL,
+      \`email\` varchar(191) NOT NULL,
+      \`auth_email\` varchar(191) NOT NULL,
+      \`username\` varchar(191) NOT NULL,
+      \`sender_name\` varchar(191) NULL,
+      \`password_enc\` text NOT NULL,
+      \`smtp_host\` varchar(191) NOT NULL DEFAULT 'smtp.gmail.com',
+      \`smtp_port\` int NOT NULL DEFAULT 465,
+      \`imap_host\` varchar(191) NOT NULL DEFAULT 'imap.gmail.com',
+      \`imap_port\` int NOT NULL DEFAULT 993,
+      \`daily_cap\` int NOT NULL DEFAULT 50,
+      \`is_enabled\` tinyint(1) NOT NULL DEFAULT 1,
+      \`provider\` varchar(32) NOT NULL DEFAULT 'gmail',
+      \`source\` varchar(32) NOT NULL DEFAULT 'saved',
+      \`created_at\` text NOT NULL,
+      \`updated_at\` text NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_mb_org_enabled\` (\`org_id\`, \`is_enabled\`),
+      KEY \`idx_mb_email\` (\`email\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
 }
 async function loadMailbox(orgId) {
-  const [rows] = await poolConnection.query("SELECT * FROM outreach_mailboxes WHERE org_id = ?", [orgId]);
-  if (rows[0]) {
+  const [rows] = await poolConnection.query(
+    "SELECT * FROM outreach_mailboxes WHERE org_id = ? AND is_enabled = 1 ORDER BY created_at ASC LIMIT 1",
+    [orgId]
+  );
+  if (rows && rows[0]) {
     try {
-      return { user: rows[0].username, password: decrypt(rows[0].password_enc), smtpHost: rows[0].smtp_host, smtpPort: rows[0].smtp_port, imapHost: rows[0].imap_host, imapPort: rows[0].imap_port, source: "saved" };
+      return {
+        user: rows[0].auth_email || rows[0].email,
+        password: decrypt(rows[0].password_enc),
+        smtpHost: rows[0].smtp_host,
+        smtpPort: rows[0].smtp_port,
+        imapHost: rows[0].imap_host,
+        imapPort: rows[0].imap_port,
+        source: "saved"
+      };
     } catch {
       return null;
     }
@@ -85604,6 +85635,33 @@ var init_outreachMailbox = __esm({
 // src/outreach/outreachConfig.ts
 function defaultsFor(orgId) {
   if (orgId === OWNER_ORG_ID) return { ...DEFAULT_OUTREACH_CONFIG };
+  if (orgId === "org-truewilly") {
+    return {
+      ...DEFAULT_OUTREACH_CONFIG,
+      fromEmail: "tech@truewilly.com",
+      bccEmail: "stackandcode.ai@gmail.com",
+      senderName: "Truewilly",
+      brandName: "Truewilly",
+      brandWebsite: "https://truewilly.com",
+      brandLogoUrl: "https://truewilly.com/favicon.ico",
+      brandColor: "#2563eb",
+      templateHeaderEnabled: true,
+      templateLogoEnabled: true,
+      templateValueBoxStyle: "callout",
+      templateValueBoxBg: "#f1f5f9",
+      templateValueBoxBorder: "#2563eb",
+      templateGreeting: "Hi {{contact_name}},",
+      templateCta: "",
+      templateSignatureStyle: "full",
+      templateBlocksOrder: ["header", "greeting", "observation", "value_box", "call_to_action", "signature", "footer"],
+      postalAddress: "Truewilly Automation, Chennai, India",
+      dailyCap: 400,
+      rampStart: 50,
+      rampStep: 25,
+      poolTarget: 100,
+      tone: "Friendly, plain and specific. Focus on practical AI and workflow automation. No hype, no statistics, no promises."
+    };
+  }
   return { ...DEFAULT_OUTREACH_CONFIG, fromEmail: "", bccEmail: "", senderName: "", postalAddress: "", signature: "", telegramChatId: "" };
 }
 function sanitizeConfig(input2, base2 = DEFAULT_OUTREACH_CONFIG) {
@@ -85642,6 +85700,24 @@ function sanitizeConfig(input2, base2 = DEFAULT_OUTREACH_CONFIG) {
     minWords: int2(i.minWords, b.minWords, 20, 400),
     maxWords: int2(i.maxWords, b.maxWords, 30, 600),
     subjectBShare: int2(i.subjectBShare, b.subjectBShare, 0, 100),
+    brandName: str(i.brandName, b.brandName, 120),
+    brandWebsite: str(i.brandWebsite, b.brandWebsite, 300),
+    brandLogoUrl: str(i.brandLogoUrl, b.brandLogoUrl, 500),
+    brandColor: /^#[0-9a-fA-F]{6}$/.test(String(i.brandColor)) ? i.brandColor : b.brandColor,
+    templateHeaderEnabled: bool(i.templateHeaderEnabled, b.templateHeaderEnabled),
+    templateLogoEnabled: bool(i.templateLogoEnabled, b.templateLogoEnabled),
+    templateValueBoxStyle: ["callout", "card", "minimal", "quote"].includes(i.templateValueBoxStyle) ? i.templateValueBoxStyle : b.templateValueBoxStyle,
+    templateValueBoxBg: str(i.templateValueBoxBg, b.templateValueBoxBg, 30),
+    templateValueBoxBorder: str(i.templateValueBoxBorder, b.templateValueBoxBorder, 30),
+    templateGreeting: str(i.templateGreeting, b.templateGreeting, 200),
+    templateCta: str(i.templateCta, b.templateCta, 400),
+    templateSignatureStyle: ["full", "compact", "plain"].includes(i.templateSignatureStyle) ? i.templateSignatureStyle : b.templateSignatureStyle,
+    templateBlocksOrder: Array.isArray(i.templateBlocksOrder) ? i.templateBlocksOrder.map(String).slice(0, 40) : b.templateBlocksOrder,
+    templateCustomBlocks: Array.isArray(i.templateCustomBlocks) ? i.templateCustomBlocks.slice(0, 30) : b.templateCustomBlocks || [],
+    templateCustomTokens: Array.isArray(i.templateCustomTokens) ? i.templateCustomTokens.slice(0, 30) : b.templateCustomTokens || [],
+    templateObservation: str(i.templateObservation, b.templateObservation || "", 2e3),
+    templateValueContent: str(i.templateValueContent, b.templateValueContent || "", 2e3),
+    templateSignoff: str(i.templateSignoff, b.templateSignoff || "Best regards,", 100),
     followupDays: intList(i.followupDays, b.followupDays, 1, 90).slice(0, 6),
     bounceLimitPercent: int2(i.bounceLimitPercent, b.bounceLimitPercent, 1, 50),
     bounceMinCount: int2(i.bounceMinCount, b.bounceMinCount, 1, 100),
@@ -85700,6 +85776,24 @@ var init_outreachConfig = __esm({
       minWords: 75,
       maxWords: 110,
       subjectBShare: 50,
+      brandName: "StackandCode",
+      brandWebsite: "https://stackandcode.com",
+      brandLogoUrl: "https://stackandcode.com/images/mark.png",
+      brandColor: "#2563eb",
+      templateHeaderEnabled: true,
+      templateLogoEnabled: true,
+      templateValueBoxStyle: "callout",
+      templateValueBoxBg: "#f1f5f9",
+      templateValueBoxBorder: "#2563eb",
+      templateGreeting: "Hi {{contact_name}},",
+      templateCta: "",
+      templateSignatureStyle: "full",
+      templateBlocksOrder: ["header", "greeting", "observation", "value_box", "call_to_action", "signature", "footer"],
+      templateCustomBlocks: [],
+      templateCustomTokens: [],
+      templateObservation: "I noticed on {{website}} that you coordinate active service operations across {{city}} and rely on an online form and phone for new customer inquiries.",
+      templateValueContent: "We set up an automated speed-to-lead workflow that replies to missed calls and new inquiries within 60 seconds, collecting project specs and dispatching them straight to your team without manual entry.",
+      templateSignoff: "Best regards,",
       followupDays: [3, 7, 14],
       bounceLimitPercent: 3,
       bounceMinCount: 2,
@@ -148208,6 +148302,70 @@ var init_orgRoutes = __esm({
   }
 });
 
+// src/org/truewillyBootstrap.ts
+async function ensureTruewillyOrg(conn) {
+  try {
+    const truewillyOrgId = "org-truewilly";
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    await conn.query(
+      `INSERT INTO organizations (id, name, type, industry, currency, created_at)
+       VALUES (?, 'Truewilly', 'company', 'Technology & AI', 'USD', ?)
+       ON DUPLICATE KEY UPDATE name = 'Truewilly', deleted_at = NULL`,
+      [truewillyOrgId, now]
+    );
+    const admins = [
+      {
+        fullName: "Athulya Arun",
+        role: "admin",
+        emails: ["athulya@truewilly.com", "athulyaarunmarketing@gmail.com", "athulyaobm@gmail.com"]
+      },
+      {
+        fullName: "Hari Haran",
+        role: "admin",
+        emails: ["hari@truewilly.com", "harigopallak45@gmail.com", "hariharan010703@gmail.com"]
+      }
+    ];
+    for (const adm of admins) {
+      for (const em of adm.emails) {
+        const [existing] = await conn.query(
+          "SELECT id, email, role, org_id, org_role FROM users WHERE LOWER(email) = ?",
+          [em.toLowerCase()]
+        );
+        let userId = existing?.[0]?.id;
+        if (!userId) {
+          userId = `usr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          await conn.query(
+            `INSERT INTO users (id, email, password_hash, full_name, role, account_type, currency, timezone, theme, org_id, org_role, created_at)
+             VALUES (?, ?, NULL, ?, 'manager', 'company', 'USD', 'UTC', 'dark', ?, 'admin', ?)`,
+            [userId, em.toLowerCase(), adm.fullName, truewillyOrgId, now]
+          );
+        } else {
+          const roleToSet = existing[0].role === "super_admin" ? "super_admin" : "manager";
+          await conn.query(
+            `UPDATE users SET org_id = COALESCE(org_id, ?), org_role = COALESCE(org_role, 'admin'), role = ? WHERE id = ?`,
+            [truewillyOrgId, roleToSet, userId]
+          );
+        }
+        await conn.query(
+          `INSERT INTO organization_members (org_id, user_id, org_role, created_at)
+           VALUES (?, ?, 'admin', ?)
+           ON DUPLICATE KEY UPDATE org_id = org_id`,
+          [truewillyOrgId, userId, now]
+        );
+      }
+    }
+    logger.info("[Org] Truewilly organisation and admins verified");
+  } catch (err) {
+    logger.error("[Org] Could not bootstrap Truewilly organisation", { err: err?.message });
+  }
+}
+var init_truewillyBootstrap = __esm({
+  "src/org/truewillyBootstrap.ts"() {
+    "use strict";
+    init_logger2();
+  }
+});
+
 // src/daily-posts/tables.ts
 async function ensureDailyPostsTables(conn) {
   await conn.query(`CREATE TABLE IF NOT EXISTS daily_posts (
@@ -148472,6 +148630,96 @@ async function ensureSocialOutreachTables(conn) {
 }
 var init_tables5 = __esm({
   "src/social-outreach/tables.ts"() {
+    "use strict";
+  }
+});
+
+// src/mcp/tables.ts
+async function ensureMcpTables(conn) {
+  await conn.query(`CREATE TABLE IF NOT EXISTS mcp_clients (
+    client_id VARCHAR(64) PRIMARY KEY,
+    client_name VARCHAR(120) NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    created_at DATETIME NOT NULL
+  ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await conn.query(`CREATE TABLE IF NOT EXISTS mcp_auth_requests (
+    id VARCHAR(64) PRIMARY KEY,
+    client_id VARCHAR(64) NOT NULL,
+    redirect_uri VARCHAR(500) NOT NULL,
+    state VARCHAR(500) NULL,
+    code_challenge VARCHAR(128) NOT NULL,
+    scope VARCHAR(300) NOT NULL,
+    expires_at DATETIME NOT NULL
+  ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await conn.query(`CREATE TABLE IF NOT EXISTS mcp_auth_codes (
+    code_hash CHAR(64) PRIMARY KEY,
+    client_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(191) NOT NULL,
+    org_id VARCHAR(191) NULL,
+    scope VARCHAR(300) NOT NULL,
+    code_challenge VARCHAR(128) NOT NULL,
+    redirect_uri VARCHAR(500) NOT NULL,
+    expires_at DATETIME NOT NULL
+  ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await conn.query(`CREATE TABLE IF NOT EXISTS mcp_tokens (
+    id VARCHAR(64) PRIMARY KEY,
+    access_hash CHAR(64) NOT NULL,
+    refresh_hash CHAR(64) NOT NULL,
+    client_id VARCHAR(64) NOT NULL,
+    client_name VARCHAR(120) NOT NULL,
+    user_id VARCHAR(191) NOT NULL,
+    org_id VARCHAR(191) NULL,
+    scope VARCHAR(300) NOT NULL,
+    access_expires_at DATETIME NOT NULL,
+    refresh_expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    last_used_at DATETIME NULL,
+    revoked_at DATETIME NULL,
+    UNIQUE KEY uq_mcp_access (access_hash),
+    UNIQUE KEY uq_mcp_refresh (refresh_hash),
+    KEY idx_mcp_user (user_id)
+  ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+}
+var init_tables6 = __esm({
+  "src/mcp/tables.ts"() {
+    "use strict";
+  }
+});
+
+// src/operator/tables.ts
+async function ensureOperatorTables(conn) {
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS \`ai_operator_sessions\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`org_id\` VARCHAR(191) NOT NULL,
+      \`user_id\` VARCHAR(191) NOT NULL,
+      \`title\` VARCHAR(255) NOT NULL,
+      \`status\` ENUM('active', 'archived') NOT NULL DEFAULT 'active',
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`idx_op_sess_org_user\` (\`org_id\`, \`user_id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS \`ai_operator_messages\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`session_id\` VARCHAR(64) NOT NULL,
+      \`role\` ENUM('user', 'assistant', 'system', 'tool') NOT NULL,
+      \`content\` MEDIUMTEXT NOT NULL,
+      \`tool_name\` VARCHAR(100) DEFAULT NULL,
+      \`tool_call_id\` VARCHAR(100) DEFAULT NULL,
+      \`tool_input_json\` MEDIUMTEXT DEFAULT NULL,
+      \`tool_output_json\` MEDIUMTEXT DEFAULT NULL,
+      \`tokens_used\` INT DEFAULT 0,
+      \`created_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`idx_op_msg_sess\` (\`session_id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+var init_tables7 = __esm({
+  "src/operator/tables.ts"() {
     "use strict";
   }
 });
@@ -189134,6 +189382,9 @@ async function initDatabase() {
     await ensureOrgTables(poolConnection).catch(
       (err) => logger.error("[Org] Could not create organisation tables", { error: err.message })
     );
+    await ensureTruewillyOrg(poolConnection).catch(
+      (err) => logger.error("[Org] Could not bootstrap Truewilly organisation", { error: err.message })
+    );
     await ensureCoordinateColumns(poolConnection).catch(
       (err) => logger.error("[Coverage] Could not add the coordinate columns", { error: err.message })
     );
@@ -189158,8 +189409,14 @@ async function initDatabase() {
     await ensureSocialOutreachTables(poolConnection).catch(
       (err) => logger.error("[SocialOutreach] Could not create the LinkedIn / Facebook outreach tables", { error: err.message })
     );
+    await ensureMcpTables(poolConnection).catch(
+      (err) => logger.error("[MCP] Could not create the assistant-connection tables", { error: err.message })
+    );
     await ensureVisitorTables(poolConnection).catch(
       (err) => logger.error("[Visitors] Could not create the website visitors tables", { error: err.message })
+    );
+    await ensureOperatorTables(poolConnection).catch(
+      (err) => logger.error("[Operator] Could not create AI operator tables", { error: err.message })
     );
     logger.info("MySQL Database connected and initialized successfully.");
   } catch (error63) {
@@ -189173,6 +189430,7 @@ var init_database = __esm({
     "use strict";
     init_engageRoutes();
     init_orgRoutes();
+    init_truewillyBootstrap();
     init_telegramBot();
     init_geo();
     init_tables2();
@@ -189182,6 +189440,8 @@ var init_database = __esm({
     init_tables3();
     init_tables4();
     init_tables5();
+    init_tables6();
+    init_tables7();
     import_promise = __toESM(require_promise2());
     init_mysql2();
     init_environment();
@@ -189191,14 +189451,15 @@ var init_database = __esm({
     if (!env.DATABASE_URL) {
       throw new Error("DATABASE_URL is not defined in the environment variables");
     }
-    connectionString = env.DATABASE_URL;
+    connectionString = process.env.NODE_ENV === "test" && process.env.TEST_DATABASE_URL ? process.env.TEST_DATABASE_URL : process.env.TEST_DATABASE_URL || env.DATABASE_URL;
     poolConnection = import_promise.default.createPool({
       uri: connectionString,
       connectionLimit: 30,
       queueLimit: 100,
       waitForConnections: true,
       enableKeepAlive: true,
-      keepAliveInitialDelay: 1e4
+      keepAliveInitialDelay: 1e4,
+      connectTimeout: 4e3
     });
     db = drizzle(poolConnection, { schema: schema_exports, mode: "default" });
   }
@@ -211985,7 +212246,32 @@ var NICHES = [
   "security company",
   "driving school",
   "tutoring center",
-  "pet groomer"
+  "pet groomer",
+  // high-converting niches for StackandCode (urgent calls, quote follow-ups, CRM sync)
+  "water damage restoration",
+  "mold remediation",
+  "garage door repair",
+  "tree service",
+  "appliance repair",
+  "kitchen remodeler",
+  "bathroom remodeler",
+  "general contractor",
+  "painting contractor",
+  "flooring contractor",
+  "fencing contractor",
+  "concrete contractor",
+  "plastic surgeon",
+  "podiatrist",
+  "audiologist",
+  "wellness clinic",
+  "immigration lawyer",
+  "estate planning attorney",
+  "property management company",
+  "bookkeeping service",
+  "wedding venue",
+  "catering company",
+  "auto detailing",
+  "dog trainer"
 ];
 var CITIES = {
   "United States": [
