@@ -211948,27 +211948,41 @@ async function findEmails(website) {
   } catch {
     return [];
   }
-  const found = /* @__PURE__ */ new Set();
-  for (const p of ["/", "/contact", "/contact-us", "/contact/", "/about", "/inquiry", "/company"]) {
-    if (found.size >= 3) break;
-    try {
-      const res = await axios_default.get(new URL(p, base2).toString(), {
-        timeout: 7e3,
-        maxRedirects: 3,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" },
-        validateStatus: (s) => s < 400
-      });
-      if (typeof res.data === "string") EmailDiscoveryEngine.extractEmailsFromHtml(res.data).forEach((e) => found.add(e));
-    } catch {
-    }
-  }
   const host = base2.hostname.replace(/^www\./, "").toLowerCase();
   const freeMail = /@(gmail|outlook|hotmail|yahoo|icloud|live|bigpond|optusnet)\./i;
   const own3 = (e) => {
     const dom = e.split("@")[1];
     return dom === host || host.endsWith(`.${dom}`) || dom.endsWith(`.${host}`) || freeMail.test(e);
   };
-  return Array.from(found).filter(isRealEmail).filter(own3).slice(0, 3);
+  const fetchPage = async (p) => {
+    try {
+      const res = await axios_default.get(new URL(p, base2).toString(), {
+        timeout: 4e3,
+        maxRedirects: 2,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" },
+        validateStatus: (s) => s < 400
+      });
+      if (typeof res.data === "string") {
+        const set2 = /* @__PURE__ */ new Set();
+        EmailDiscoveryEngine.extractEmailsFromHtml(res.data).forEach((e) => set2.add(e));
+        return Array.from(set2).filter(isRealEmail).filter(own3);
+      }
+    } catch {
+    }
+    return [];
+  };
+  const homeEmails = await fetchPage("/");
+  if (homeEmails.length > 0) return homeEmails.slice(0, 3);
+  const found = /* @__PURE__ */ new Set();
+  const subPages = ["/contact", "/contact-us", "/about"];
+  const results = await Promise.allSettled(subPages.map(fetchPage));
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      r.value.forEach((e) => found.add(e));
+      if (found.size >= 3) break;
+    }
+  }
+  return Array.from(found).slice(0, 3);
 }
 function findInstalledChromium() {
   if (process.env.PW_CHROME_PATH) return process.env.PW_CHROME_PATH;
@@ -212696,7 +212710,8 @@ function onBlocked(workerId) {
 var RAM_UP = Number(process.env.PC_RAM_UP ?? 93);
 var RAM_DOWN = Number(process.env.PC_RAM_DOWN ?? 99);
 var CPU_LIMIT = 99;
-var PER_BROWSER_MB = parseInt(process.env.PC_TABS_PER_WINDOW || "1", 10) > 1 ? 400 : 550;
+var IS_HEADLESS = process.env.PC_HEADLESS === "1";
+var PER_BROWSER_MB = IS_HEADLESS ? 240 : parseInt(process.env.PC_TABS_PER_WINDOW || "1", 10) > 1 ? 380 : 550;
 var RAM_RESERVE_MB = parseInt(process.env.PC_RAM_RESERVE_MB || "1200", 10);
 var ramFits = () => Math.max(1, Math.floor((import_os2.default.freemem() / 1048576 - RAM_RESERVE_MB) / PER_BROWSER_MB));
 var resourceCap = Math.min(WORKERS, Math.max(2, ramFits()));
@@ -212788,7 +212803,14 @@ async function newPage(browser, id) {
   let pending = sharedCtx.get(key2);
   if (!pending) {
     pending = browser.newContext({ viewport: { width: 800, height: 600 }, locale: "en-US" }).then(async (c) => {
-      await c.route("**/*", (route) => ["image", "media", "font"].includes(route.request().resourceType()) ? route.abort() : route.continue());
+      await c.route("**/*", (route) => {
+        const type = route.request().resourceType();
+        const u = route.request().url();
+        if (["image", "media", "font"].includes(type) || /google-analytics|doubleclick|googletagmanager|clarity\.ms|facebook\.net|hotjar/i.test(u)) {
+          return route.abort();
+        }
+        return route.continue();
+      });
       return c;
     });
     sharedCtx.set(key2, pending);
@@ -213101,9 +213123,22 @@ async function main() {
   const exe = findInstalledChromium();
   const browser = await import_playwright.chromium.launch({
     headless: process.env.PC_HEADLESS === "1",
-    // Linux servers without a screen run it under Xvfb (windows, unseen) or set PC_HEADLESS=1
     ...exe ? { executablePath: exe } : {},
-    args: ["--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "--window-position=40,40"]
+    args: [
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
+      "--window-position=40,40",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
+      "--disable-extensions",
+      "--mute-audio",
+      "--disable-default-apps",
+      "--no-first-run",
+      "--disable-component-update",
+      "--js-flags=--max-old-space-size=256"
+    ]
   });
   browser.on("disconnected", () => {
     if (!closing && !shouldStop()) {
